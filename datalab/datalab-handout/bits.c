@@ -153,8 +153,7 @@ int bitXor(int x, int y) {
  *   Rating: 1
  */
 int tmin(void) {
-
-  return 2;
+  return (1 << 31);
 
 }
 //2
@@ -166,7 +165,9 @@ int tmin(void) {
  *   Rating: 1
  */
 int isTmax(int x) {
-  return 2;
+  int y = x + 1;
+  int z = ~(x ^ y);
+  return !(z + !y);
 }
 /* 
  * allOddBits - return 1 if all odd-numbered bits in word set to 1
@@ -177,7 +178,10 @@ int isTmax(int x) {
  *   Rating: 2
  */
 int allOddBits(int x) {
-  return 2;
+  int y = 0xAA;
+  int z = (y << 8) + y;
+  int q = (z << 16) + z;
+  return !((q & x) ^ q);
 }
 /* 
  * negate - return -x 
@@ -187,7 +191,7 @@ int allOddBits(int x) {
  *   Rating: 2
  */
 int negate(int x) {
-  return 2;
+  return ~x + 1;
 }
 //3
 /* 
@@ -200,7 +204,9 @@ int negate(int x) {
  *   Rating: 3
  */
 int isAsciiDigit(int x) {
-  return 2;
+  int digit = x & 0xf;
+  int result = !((0x9 + (~digit + 1)) >> 31);
+  return !((x >> 4) ^ 0x3) & result;
 }
 /* 
  * conditional - same as x ? y : z 
@@ -210,7 +216,9 @@ int isAsciiDigit(int x) {
  *   Rating: 3
  */
 int conditional(int x, int y, int z) {
-  return 2;
+  int zero = !!x;
+  int or = ~zero + 1;
+  return (y & or) | (z & ~or);
 }
 /* 
  * isLessOrEqual - if x <= y  then return 1, else return 0 
@@ -220,7 +228,11 @@ int conditional(int x, int y, int z) {
  *   Rating: 3
  */
 int isLessOrEqual(int x, int y) {
-  return 2;
+  int a = x >> 31;
+  int b = y >> 31;
+  int ab = a ^ b;
+  int plus = (y + (~x + 1)) >> 31;
+  return !((!ab & plus) | (ab & b));
 }
 //4
 /* 
@@ -232,7 +244,7 @@ int isLessOrEqual(int x, int y) {
  *   Rating: 4 
  */
 int logicalNeg(int x) {
-  return 2;
+  return ((x | (~x + 1)) >> 31) + 1;
 }
 /* howManyBits - return the minimum number of bits required to represent x in
  *             two's complement
@@ -247,7 +259,25 @@ int logicalNeg(int x) {
  *  Rating: 4
  */
 int howManyBits(int x) {
-  return 0;
+  int sign = x >> 31;
+  x = (sign & ~x) | (~sign & x); // x为正则不变， 为负则取反
+  int b16, b8, b4, b2, b1, b0;
+  /* 二分查找bits的位数，16、8、4、2、1
+     前16位如果没有值，则b16返回0，依次
+     类推
+   */
+  b16 = !!(x >> 16) << 4;
+  x = x >> b16;
+  b8 = !!(x >> 8) << 3;
+  x = x >> b8;
+  b4 = !!(x >> 4) << 2;
+  x = x >> b4;
+  b2 = !!(x >> 2) << 1;
+  x = x >> b2;
+  b1 = !!(x >> 1);
+  x = x >> b1;
+  b0 = x;
+  return b16 + b8 + b4 + b2 + b1 + b0 + 1;
 }
 //float
 /* 
@@ -262,7 +292,23 @@ int howManyBits(int x) {
  *   Rating: 4
  */
 unsigned floatScale2(unsigned uf) {
-  return 2;
+  unsigned sign = uf & 0x80000000;
+  unsigned exp = (uf >> 23) & 0xff;
+  unsigned frac = uf & 0x7fffff;
+  unsigned result;
+  if (exp == 0xff) {
+    return uf;
+  } else if (exp) {
+    exp++;
+  } else {
+    /* 此处分两种情况，一是frac最高位为1（>=0.5）需进1，即exp需加1；
+       二为正常扩大一倍，即frac左移。两种办法的表达一致，exp+1的情况
+       在frac|(exp)后属正常
+    */
+    frac <<= 1;
+  }
+  result = sign | (exp << 23) | frac;
+  return result;
 }
 /* 
  * floatFloat2Int - Return bit-level equivalent of expression (int) f
@@ -277,7 +323,25 @@ unsigned floatScale2(unsigned uf) {
  *   Rating: 4
  */
 int floatFloat2Int(unsigned uf) {
-  return 2;
+  unsigned sign = uf & 0x80000000;;
+  unsigned exp = (uf >> 23) & 0xff;
+  unsigned frac = uf & 0x7fffff;
+  int result;
+  if (exp > 158 || exp == 255) { // 超出int范围
+    return 0x80000000u;
+  } else if (exp < 127) {   // 只有小数部分
+    return 0;
+  } else if (exp > 150) {   // E>23
+    result = frac << (exp - 150);
+  } else if (exp == 127) {  // 阶码为0，但M为1+f
+    result = 1;
+  } else {                  // E<23
+    result = frac >> (150 - exp);
+  }
+  if (sign) {
+    result = -result;
+  }
+  return result;  
 }
 /* 
  * floatPower2 - Return bit-level equivalent of the expression 2.0^x
@@ -293,5 +357,12 @@ int floatFloat2Int(unsigned uf) {
  *   Rating: 4
  */
 unsigned floatPower2(int x) {
-    return 2;
+  int exp = x + 127;
+  if (exp >= 255) {
+    return 0x7f800000;
+  }
+  if (exp <= 0) {
+    return 0;
+  } 
+  return exp << 23;
 }
