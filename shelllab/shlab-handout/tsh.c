@@ -64,6 +64,16 @@ void sigchld_handler(int sig);
 void sigtstp_handler(int sig);
 void sigint_handler(int sig);
 
+/* Here are error wrapper functions */
+pid_t Fork(void);
+void Sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+void Sigemptyset(sigset_t *set);
+void Sigfillset(sigset_t *set);
+void Sigaddset(sigset_t *set, int signum);
+void Execve(const char *filename, char *const argv[], char *const envp[]);
+void Setpgid(pid_t pid, pid_t pgid);
+void Kill(pid_t pid, int sig);
+
 /* Here are helper routines that we've provided for you */
 int parseline(const char *cmdline, char **argv); 
 void sigquit_handler(int sig);
@@ -165,6 +175,44 @@ int main(int argc, char **argv)
 */
 void eval(char *cmdline) 
 {
+    char *argv[MAXARGS];    // 新建数组存放参数
+    char buf[MAXLINE];      // 新建数组存放cmdline
+    int bg;                 // 输入参数要求前台或后台执行
+    int state;              // 不为后台执行则改变参数
+    pid_t pid;              // 子进程pid
+
+    strcpy(buf, cmdline);          // 拷贝cmdline
+    bg = parseline(buf, argv);
+    state = bg ? BG : FG;
+    if (argv[0] == NULL) return;   // 无效
+    sigset_t mask_all;             // 新建一个信号集合
+    sigset_t mask_one;
+    sigset_t prev_one;
+    Sigfillset(&mask_all);         // 将每个信号添加到集合中
+    Sigemptyset(&mask_one);        // 初始化
+    Sigaddset(&mask_one, SIGCHLD); // 添加SIGCHLD信号到maskone
+    if (!builtin_cmd(argv)) {      // 检测命令是否内置
+        // 阻塞SIGCHLD信号并将其存入prevone中
+        Sigprocmask(SIG_BLOCK, &mask_one, &prev_one);   
+        if ((pid = Fork()) == 0) {                     // 创建子进程
+            Sigprocmask(SIG_SETMASK, &prev_one, NULL); // 在子进程中解除SIGCHLD信号的阻塞
+            Setpgid(0, 0);                             // 创建新进程组，id设为0
+            Execve(argv[0], argv, environ);            // 在子进程中执行  
+            exit(0);
+        }        
+        if (state == FG) {
+            Sigprocmask(SIG_BLOCK, &mask_all, NULL);   // 阻塞所有信号
+            addjob(jobs, pid, state, cmdline);         // 添加jobs
+            Sigprocmask(SIG_SETMASK, &mask_one, NULL); // 此处并未解除阻塞
+            waitfg(pid);                               // 等待前台进程执行完毕
+        } else {
+            Sigprocmask(SIG_BLOCK, &mask_all, NULL);
+            addjob(jobs, pid, state, cmdline);
+            Sigprocmask(SIG_SETMASK, &mask_one, NULL); // 此处并未解除阻塞
+            printf("[%d] (%d) %s", pid2jid(pid), pid, cmdline); // 打印后台进程信息
+        }
+        Sigprocmask(SIG_SETMASK, &prev_one, NULL);     // 解除阻塞
+    }    
     return;
 }
 
@@ -232,6 +280,18 @@ int parseline(const char *cmdline, char **argv)
  */
 int builtin_cmd(char **argv) 
 {
+    if (!strcmp(argv[0], "quit"))
+        exit(0);
+    if (!strcmp(argv[0], "fg") || !strcmp(argv[0], "bg")) {
+        do_bgfg(argv);
+        return 1;
+    }    
+    if (!strcmp(argv[0], "jobs")) {
+        listjobs(jobs);
+        return 1;
+    }
+    if (!strcmp(argv[0], "&"))
+        return 1;    
     return 0;     /* not a builtin command */
 }
 
@@ -240,6 +300,42 @@ int builtin_cmd(char **argv)
  */
 void do_bgfg(char **argv) 
 {
+    struct job_t *job = NULL;      // 新建job
+    int state;                     // BG或FG
+    int id;                        // jid或pid
+    if (!strcmp(argv[0], "bg"))
+        state = BG;
+    else state = FG;
+    if (argv[1] == NULL) {         // 参数为空
+        printf("%s command requires PID or %%jobid argument\n", argv[0]);
+        return;
+    }
+    if (argv[1][0] == '%') {       // 判定为jid，因为前面设置jid为%%d
+        if (sscanf(&argv[1][1], "%d", &id) > 0) {
+            job = getjobjid(jobs, id);
+            if (job == NULL) {
+                printf("%d: No such job\n", id);
+                return;
+            }
+        }
+    } else if (!isdigit(argv[1][0])) {  // 其他符号，非法输入
+        printf("%s: argument must be a PID or %%jobid\n", argv[0]);
+        return;
+    } else {                       // 此时为pid
+        id = atoi(argv[1]);
+        job = getjobpid(jobs, id);
+        if (job == NULL) {
+            printf("(%d): NO such process\n", id);
+            return;
+        }
+    }
+    // 此处pid < 0，因此发送SIGCONT信号给进程组|pid|中的每个进程
+    Kill(-(job->pid), SIGCONT);    
+    job->state = state;
+    if (state == BG)
+        printf("[%d] (%d) %s", job->jid, job->pid, job->cmdline);
+    else
+        waitfg(job->pid);
     return;
 }
 
@@ -248,6 +344,11 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
+    sigset_t mask;
+    Sigemptyset(&mask);
+    while (fgpid(jobs) != 0) {
+        sigsuspend(&mask);         // 原子版本pause()
+    }
     return;
 }
 
@@ -264,6 +365,30 @@ void waitfg(pid_t pid)
  */
 void sigchld_handler(int sig) 
 {
+    int olderrno = errno;          // 由于errno是全局变量,注意保存和恢复errno
+    int status;
+    pid_t pid;
+    struct job_t *job;
+    sigset_t mask, prev;
+    sigfillset(&mask);
+    //立即返回该子进程的pid
+    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0){      
+        sigprocmask(SIG_BLOCK, &mask, &prev);   //阻塞所有信号
+        if (WIFEXITED(status)){                 //正常终止
+            deletejob(jobs, pid);
+        }
+        else if (WIFSIGNALED(status)){          //因为信号而终止, 打印
+            printf ("Job [%d] (%d) terminated by signal %d\n", pid2jid(pid), pid, WTERMSIG(status));
+            deletejob(jobs, pid);
+        }
+        else if (WIFSTOPPED(status)){           //因为信号而停止, 打印
+            printf ("Job [%d] (%d) stoped by signal %d\n", pid2jid(pid), pid, WSTOPSIG(status));
+            job = getjobpid(jobs, pid);
+            job->state = ST;
+        }
+        sigprocmask(SIG_SETMASK, &prev, NULL);          
+    }
+    errno = olderrno;
     return;
 }
 
@@ -274,6 +399,18 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 {
+    
+    int olderrno = errno;
+    int pid;
+    sigset_t mask_all, prev;
+    Sigfillset(&mask_all);
+    Sigprocmask(SIG_BLOCK, &mask_all, &prev);
+    // jobs为全局变量
+    if ((pid = fgpid(jobs)) != 0) {
+        Sigprocmask(SIG_SETMASK, &prev, NULL);
+        Kill(-pid, SIGINT);
+    }
+    errno = olderrno;
     return;
 }
 
@@ -284,6 +421,16 @@ void sigint_handler(int sig)
  */
 void sigtstp_handler(int sig) 
 {
+    int olderrno = errno;
+    int pid;
+    sigset_t mask_all, prev;
+    Sigfillset(&mask_all);
+    Sigprocmask(SIG_BLOCK, &mask_all, &prev);
+    if((pid = fgpid(jobs)) > 0){
+        Sigprocmask(SIG_SETMASK, &prev, NULL);
+        Kill(-pid, SIGSTOP);
+    }
+    errno = olderrno;
     return;
 }
 
@@ -506,5 +653,54 @@ void sigquit_handler(int sig)
     exit(1);
 }
 
+/* 
+ * Error wrapper functions
+ */
+pid_t Fork(void) {
+    pid_t pid;
+    if ((pid = fork()) < 0) {
+        unix_error("Fork error");
+    }
+    return pid;
+}
 
+void Sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
+    if (sigprocmask(how, set, oldset) < 0) {
+        unix_error("Sigprocmask error");
+    }
+}
 
+void Sigfillset(sigset_t *set) {
+    if (sigfillset(set) < 0)
+        unix_error("Sigfillset error");
+}
+
+void Sigemptyset(sigset_t *set) {
+    if (sigemptyset(set) < 0) {
+        unix_error("sigemptyset error");
+    }
+}
+
+void Sigaddset(sigset_t *set, int signum) {
+    if (sigaddset(set, signum) < 0) {
+        unix_error("Sigaddset error");
+    }
+}
+
+void Execve(const char *filename, char *const argv[], char *const envp[]) {
+    if (execve(filename, argv, envp) < 0) {
+        printf("%s : Command not found.\n", argv[0]);
+    }
+}
+
+void Setpgid(pid_t pid, pid_t pgid) {
+    if (setpgid(pid, pgid) < 0) {
+        unix_error("Setpgid error");
+    }
+}
+
+void Kill(pid_t pid, int sig) {
+    if (kill(pid, sig) < 0) {
+        unix_error("Kill error");
+    }
+}
