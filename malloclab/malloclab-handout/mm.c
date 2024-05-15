@@ -73,15 +73,14 @@ static char *heap_listp;
 static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
 static void *find_fit(size_t asize);
-static void place(void *bp, size_t asize);
+static void  place(void *bp, size_t asize);
 
 
 /* 
  * mm_init - initialize the malloc package.
  */
-int mm_init(void)
-{
-    if((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1)
+int mm_init(void) {
+    if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *) -1)
         return -1;
     PUT(heap_listp, 0);                              
     PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1));     
@@ -90,7 +89,7 @@ int mm_init(void)
     heap_listp += (2*WSIZE);
 
 
-    if(extend_heap(CHUNKSIZE/WSIZE) == NULL)
+    if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
         return -1;
     return 0;
 }
@@ -99,25 +98,24 @@ int mm_init(void)
  * mm_malloc - Allocate a block by incrementing the brk pointer.
  *     Always allocate a block whose size is a multiple of the alignment.
  */
-void *mm_malloc(size_t size)
-{
+void *mm_malloc(size_t size) {
     size_t asize;
     size_t extendsize;
     char *bp;
-    if(size == 0)
+    if (size == 0)
         return NULL;
-    if(size <= DSIZE)
+    if (size <= DSIZE)
         asize = 2*DSIZE;
     else
         asize = DSIZE * ((size + (DSIZE) + (DSIZE-1)) / DSIZE);
 
-    if((bp = find_fit(asize)) != NULL){
+    if ((bp = find_fit(asize)) != NULL) {
         place(bp, asize);
         return bp;
     }
 
     extendsize = MAX(asize, CHUNKSIZE);
-    if((bp = extend_heap(extendsize/WSIZE)) == NULL)
+    if ((bp = extend_heap(extendsize/WSIZE)) == NULL)
         return NULL;
     place(bp, asize);
     return bp;
@@ -126,10 +124,7 @@ void *mm_malloc(size_t size)
 /*
  * mm_free - Freeing a block does nothing.
  */
-void mm_free(void *ptr)
-{
-    if(ptr==0)
-        return;
+void mm_free(void *ptr) {
     size_t size = GET_SIZE(HDRP(ptr));
 
     PUT(HDRP(ptr), PACK(size, 0));
@@ -140,15 +135,14 @@ void mm_free(void *ptr)
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
  */
-void *mm_realloc(void *ptr, size_t size)
-{
+void *mm_realloc(void *ptr, size_t size) {
     void *newptr;
     size_t copysize;
     
-    if((newptr = mm_malloc(size)) == NULL)
+    if ((newptr = mm_malloc(size)) == NULL)
         return 0;
     copysize = GET_SIZE(HDRP(ptr));
-    if(size < copysize)
+    if (size < copysize)
         copysize = size;
     memcpy(newptr, ptr, copysize);
     mm_free(ptr);
@@ -157,51 +151,58 @@ void *mm_realloc(void *ptr, size_t size)
 
 
 static void *extend_heap(size_t words) {
-    char *bp;
+    char  *bp;
     size_t size;
-
-    size = (words % 2) ? (words+1) * WSIZE : words * WSIZE;
-
-
-    if((long)(bp = mem_sbrk(size)) == -1)
+    // 保证扩展的大小是是双字对齐的
+    size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE;
+    // 改变指针bp位置，如果堆没有足够的空闲块了，就返回-1
+    if ((long)(bp = mem_sbrk(size)) == -1)
         return NULL;
     
-    PUT(HDRP(bp), PACK(size, 0));         
-    PUT(FTRP(bp), PACK(size, 0));          
-    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));  
+    PUT(HDRP(bp), PACK(size, 0));             // 写入空闲块头部      
+    PUT(FTRP(bp), PACK(size, 0));             // 写入空闲块脚部
+    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));     // 将该空闲块的下一块的头部大小设定为0，且分配位设置为已分配
 
-    return coalesce(bp);
+    // 未扩展前的堆可能以空闲块结尾，合并这两个空闲块，并返回块指针bp
+    return coalesce(bp);                      
 }
 
 static void *coalesce(void *bp) {
-    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));   
-    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));   
-    size_t size = GET_SIZE(HDRP(bp));                     
-    if(prev_alloc && next_alloc){
+    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));  // 前一个块的分配位 
+    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));  // 后一个块的分配位 
+    size_t size = GET_SIZE(HDRP(bp));                    // 当前块的大小     
+
+    // 情况1：前面和后面块都已分配，直接返回          
+    if (prev_alloc && next_alloc) {  
         return bp;
     }
 
-    else if(prev_alloc && !next_alloc){
-        size += GET_SIZE(HDRP(NEXT_BLKP(bp))); 
-        PUT(HDRP(bp), PACK(size, 0));        
-        PUT(FTRP(bp), PACK(size, 0));          
+    // 情况2：前面块已分配，后面块空闲 
+    else if (prev_alloc && !next_alloc) {
+        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));           // 当前块的大小加上后面块的大小
+        PUT(HDRP(bp), PACK(size, 0));                    // 将后面块的头部大小设置为总和，分配位空闲
+        PUT(FTRP(bp), PACK(size, 0));                    // 将后面块的脚部大小设置为总和，分配位空闲     
     }
 
-    else if(!prev_alloc && next_alloc){
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))); 
-        PUT(FTRP(bp), PACK(size, 0));
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-        bp = PREV_BLKP(bp);                    
+    // 情况3：后面块已分配，前面块空闲 
+    else if (!prev_alloc && next_alloc) {
+        size += GET_SIZE(HDRP(PREV_BLKP(bp)));           // 当前块的大小加上前面块的大小
+        PUT(FTRP(bp), PACK(size, 0));                    // 将前面块的脚部大小设置为总和，分配位空闲
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));         // 将前面块的头部大小设置为总和，分配位空闲
+        bp = PREV_BLKP(bp);                              // 改变块指针bp位置，将其从当前块的有效载荷移到前面块的有效载荷处
     }
  
-    else{
+    // 情况4：前面和后面块都空闲
+    else {
+        // 前面块和后面块的大小都加上
         size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));  
-        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-        bp = PREV_BLKP(bp);
+        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));         // 将后面块的脚部大小设置为总和，分配位空闲     
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));         // 将前面块的头部大小设置为总和，分配位空闲
+        bp = PREV_BLKP(bp);                              // 改变块指针bp位置，将其从当前块的有效载荷移到前面块的有效载荷处
     }
     return bp;
 }
+
 
 static void *find_fit(size_t asize) {
     void *bp;
@@ -216,7 +217,7 @@ static void *find_fit(size_t asize) {
 static void place(void *bp, size_t asize) {
     size_t csize = GET_SIZE(HDRP(bp));
     
-    if((csize - asize) >= 2*DSIZE) {
+    if ((csize - asize) >= 2*DSIZE) {
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
         bp = NEXT_BLKP(bp);
@@ -224,7 +225,7 @@ static void place(void *bp, size_t asize) {
         PUT(FTRP(bp), PACK(csize - asize, 0));
     }
     
-    else{
+    else {
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
     }
