@@ -45,24 +45,28 @@ team_t team = {
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
 // 基本参数设置
-#define WSIZE        4
-#define DSIZE        8
-#define CHUNKSIZE   (1 << 12)
+#define WSIZE        4                         // 字大小以及头部、脚部大小
+#define DSIZE        8                         // 双字大小
+#define CHUNKSIZE   (1 << 12)                  // 堆扩展的默认大小
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
-#define PACK(size, alloc) ((size) | (alloc))
+#define PACK(size, alloc) ((size) | (alloc))   // 将块大小和分配位进行或运算
 
-#define GET(p)      (*(unsigned int *) (p))
-#define PUT(p, val) (*(unsigned int *) (p) = (val))
+#define GET(p)      (*(unsigned int *) (p))    // 读指针p的位置        
+#define PUT(p, val) (*(unsigned int *) (p) = (val)) // 写指针p的位置
 
-#define GET_SIZE(p)  (GET(p) & ~0x7)
-#define GET_ALLOC(p) (GET(p) & 0x1)
+#define GET_SIZE(p)  (GET(p) & ~0x7)           // 得到块的大小
+#define GET_ALLOC(p) (GET(p) & 0x1)            // 块是否已分配
 
-#define HDRP(bp) ((char *)(bp) - WSIZE)
-#define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
+// 给定块指针bp，得到它头部的指针
+#define HDRP(bp) ((char *)(bp) - WSIZE)        
+// 给定块指针bp，得到它脚部的指针
+#define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE) 
 
+// 给定块指针bp，得到它下一个块的指针
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
+// 给定块指针bp，得到它前一个块的指针
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
 
@@ -104,6 +108,7 @@ void *mm_malloc(size_t size) {
     char *bp;
     if (size == 0)
         return NULL;
+    // 此处表明最小块大小必须是16字节，8字节给头部和脚部，8字节满足对齐要求
     if (size <= DSIZE)
         asize = 2*DSIZE;
     else
@@ -203,7 +208,7 @@ static void *coalesce(void *bp) {
     return bp;
 }
 
-
+// 首次适配
 static void *find_fit(size_t asize) {
     void *bp;
     for(bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
@@ -214,9 +219,11 @@ static void *find_fit(size_t asize) {
     return NULL;
 }
 
+
 static void place(void *bp, size_t asize) {
     size_t csize = GET_SIZE(HDRP(bp));
-    
+
+    // 当请求块的大小与当前块大小之差大于16字时，才进行分割
     if ((csize - asize) >= 2*DSIZE) {
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
