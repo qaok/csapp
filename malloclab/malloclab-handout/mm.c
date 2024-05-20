@@ -54,11 +54,11 @@ team_t team = {
 #define PACK(size, alloc) ((size) | (alloc))   // 将块大小和分配位进行或运算
 
 #define GET(p)      (*(unsigned int *) (p))    // 读指针p的位置        
-#define PUT(p, val) (*(unsigned int *) (p) = (val)) // 写指针p的位置
+#define PUT(p, val) ((*(unsigned int *)(p)) = (val)) // 写指针p的位置
 
 #define GET_SIZE(p)  (GET(p) & ~0x7)           // 得到块的大小
 #define GET_ALLOC(p) (GET(p) & 0x1)            // 块是否已分配
-
+  
 // 给定块指针bp，得到它头部的指针
 #define HDRP(bp) ((char *)(bp) - WSIZE)        
 // 给定块指针bp，得到它脚部的指针
@@ -70,30 +70,46 @@ team_t team = {
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
 
-
+#define HEAD(num)     (heap_listp + WSIZE * num)
+#define GET_HEAD(num) ((char *)(long)(GET(HEAD(num))))
+#define GET_PREV(bp)  ((char *)(long)(GET(bp)))
+#define GET_NEXT(bp)  ((char *)(long)(GET((char *)bp + WSIZE)))
+    
+    
+#define LIST_SIZE 16
+#define INIT_SIZE (LIST_SIZE * WSIZE)    
+static char* free_list[LIST_SIZE];
 static char *heap_listp;
 
 // 辅助函数
-static void *extend_heap(size_t words);
-static void *coalesce(void *bp);
+static void *extend_heap(size_t words); 
+static void *coalesce(void *bp);           
 static void *find_fit(size_t asize);
-static void  place(void *bp, size_t asize);
+static void *best_fit(size_t asize);
+static void  place(void *bp, size_t asize); 
+static void  delete(void *bp);              
+static void  insert(void *bp);              
+static int   search(size_t size);           
 
 
 /* 
  * mm_init - initialize the malloc package.
  */
 int mm_init(void) {
-    if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *) -1)
+    if((heap_listp = mem_sbrk(4*WSIZE + INIT_SIZE)) == (void *)-1)
         return -1;
-    PUT(heap_listp, 0);                              
-    PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1));     
-    PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1));     
-    PUT(heap_listp + (3*WSIZE), PACK(0, 1));         
-    heap_listp += (2*WSIZE);
+ 
+    for(int i = 0; i < LIST_SIZE; i++){
+        free_list[i] = HEAD(i);
+        PUT(free_list[i], NULL);
+    }
+    PUT(heap_listp + INIT_SIZE, 0);
+    PUT(heap_listp + WSIZE + INIT_SIZE, PACK(DSIZE, 1));   
+    PUT(heap_listp + 2*WSIZE + INIT_SIZE, PACK(DSIZE, 1));    
+    PUT(heap_listp + 3*WSIZE + INIT_SIZE, PACK(0, 1));      
 
 
-    if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
+    if(extend_heap(CHUNKSIZE/WSIZE) == NULL)
         return -1;
     return 0;
 }
@@ -106,21 +122,21 @@ void *mm_malloc(size_t size) {
     size_t asize;
     size_t extendsize;
     char *bp;
-    if (size == 0)
+    if(size == 0)
         return NULL;
     // 此处表明最小块大小必须是16字节，8字节给头部和脚部，8字节满足对齐要求
-    if (size <= DSIZE)
+    if(size <= DSIZE)
         asize = 2*DSIZE;
     else
         asize = DSIZE * ((size + (DSIZE) + (DSIZE-1)) / DSIZE);
 
-    if ((bp = find_fit(asize)) != NULL) {
+    if((bp = best_fit(asize)) != NULL){
         place(bp, asize);
         return bp;
     }
-
+    
     extendsize = MAX(asize, CHUNKSIZE);
-    if ((bp = extend_heap(extendsize/WSIZE)) == NULL)
+    if((bp = extend_heap(extendsize/WSIZE)) == NULL)
         return NULL;
     place(bp, asize);
     return bp;
@@ -130,6 +146,8 @@ void *mm_malloc(size_t size) {
  * mm_free - Freeing a block does nothing.
  */
 void mm_free(void *ptr) {
+    if(ptr==0)
+        return;
     size_t size = GET_SIZE(HDRP(ptr));
 
     PUT(HDRP(ptr), PACK(size, 0));
@@ -144,16 +162,15 @@ void *mm_realloc(void *ptr, size_t size) {
     void *newptr;
     size_t copysize;
     
-    if ((newptr = mm_malloc(size)) == NULL)
+    if((newptr = mm_malloc(size))==NULL)
         return 0;
     copysize = GET_SIZE(HDRP(ptr));
-    if (size < copysize)
+    if(size < copysize)
         copysize = size;
     memcpy(newptr, ptr, copysize);
     mm_free(ptr);
     return newptr;
 }
-
 
 static void *extend_heap(size_t words) {
     char  *bp;
@@ -169,7 +186,7 @@ static void *extend_heap(size_t words) {
     PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));     // 将该空闲块的下一块的头部大小设定为0，且分配位设置为已分配
 
     // 未扩展前的堆可能以空闲块结尾，合并这两个空闲块，并返回块指针bp
-    return coalesce(bp);                      
+    return coalesce(bp);                    
 }
 
 static void *coalesce(void *bp) {
@@ -178,58 +195,90 @@ static void *coalesce(void *bp) {
     size_t size = GET_SIZE(HDRP(bp));                    // 当前块的大小     
 
     // 情况1：前面和后面块都已分配，直接返回          
-    if (prev_alloc && next_alloc) {  
+    if (prev_alloc && next_alloc) {
+        insert(bp);
         return bp;
     }
 
     // 情况2：前面块已分配，后面块空闲 
     else if (prev_alloc && !next_alloc) {
+        delete(NEXT_BLKP(bp));
         size += GET_SIZE(HDRP(NEXT_BLKP(bp)));           // 当前块的大小加上后面块的大小
         PUT(HDRP(bp), PACK(size, 0));                    // 将后面块的头部大小设置为总和，分配位空闲
         PUT(FTRP(bp), PACK(size, 0));                    // 将后面块的脚部大小设置为总和，分配位空闲     
-    }
+    } 
 
     // 情况3：后面块已分配，前面块空闲 
     else if (!prev_alloc && next_alloc) {
+        delete(PREV_BLKP(bp));
         size += GET_SIZE(HDRP(PREV_BLKP(bp)));           // 当前块的大小加上前面块的大小
-        PUT(FTRP(bp), PACK(size, 0));                    // 将前面块的脚部大小设置为总和，分配位空闲
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));         // 将前面块的头部大小设置为总和，分配位空闲
-        bp = PREV_BLKP(bp);                              // 改变块指针bp位置，将其从当前块的有效载荷移到前面块的有效载荷处
+        PUT(FTRP(bp), PACK(size, 0));
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+        bp = PREV_BLKP(bp); 
     }
  
     // 情况4：前面和后面块都空闲
     else {
+        delete(NEXT_BLKP(bp));
+        delete(PREV_BLKP(bp));
         // 前面块和后面块的大小都加上
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));  
-        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));         // 将后面块的脚部大小设置为总和，分配位空闲     
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));         // 将前面块的头部大小设置为总和，分配位空闲
-        bp = PREV_BLKP(bp);                              // 改变块指针bp位置，将其从当前块的有效载荷移到前面块的有效载荷处
+        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
+        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+        bp = PREV_BLKP(bp);
+        
     }
+    insert(bp);
     return bp;
 }
 
 // 首次适配
 static void *find_fit(size_t asize) {
-    void *bp;
-    for(bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
-        if((GET_SIZE(HDRP(bp)) >= asize) && (!GET_ALLOC(HDRP(bp)))){
-            return bp;
+    int num = search(asize);
+    char *bp;
+    for (; num < LIST_SIZE; num++) {
+        for(bp = GET_HEAD(num); bp != NULL; bp = GET_NEXT(bp)) {
+            if (GET_SIZE(HDRP(bp)) >= asize) {
+                return bp;
+            }
         }
     }
     return NULL;
 }
 
+static void *best_fit(size_t asize) {
+    size_t size_gap = 1 << 30;
+    int num = search(asize);
+    char *bp;
+    char *best_addr = NULL, *temp;
+    for (; num < LIST_SIZE; num++) {
+        for(bp = GET_HEAD(num); bp != NULL; bp = GET_NEXT(bp)) {
+            temp = HDRP(bp);
+            if (GET_SIZE(temp) - asize < size_gap) {
+                size_gap = GET_SIZE(temp) - asize;
+                best_addr = bp;
+                if (GET_SIZE(temp) == asize) return best_addr;
+            }
+        }
+    }
+    return best_addr;
+}
+ 
+
 
 static void place(void *bp, size_t asize) {
     size_t csize = GET_SIZE(HDRP(bp));
-
-    // 当请求块的大小与当前块大小之差大于16字时，才进行分割
-    if ((csize - asize) >= 2*DSIZE) {
+    size_t remain_size = csize - asize;
+    delete(bp);
+    // 当请求块的大小与当前块大小之差大于16字节时，才进行分割
+    if (remain_size >= 2*DSIZE) {
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
         bp = NEXT_BLKP(bp);
-        PUT(HDRP(bp), PACK(csize - asize, 0));
-        PUT(FTRP(bp), PACK(csize - asize, 0));
+        PUT(HDRP(bp), PACK(remain_size, 0));
+        PUT(FTRP(bp), PACK(remain_size, 0));
+
+        insert(bp);
     }
     
     else {
@@ -239,12 +288,54 @@ static void place(void *bp, size_t asize) {
 }
 
 
+static void delete(void *bp) {
+    size_t size = GET_SIZE(HDRP(bp));
+    int num = search(size);
+    char* prev = GET_PREV(bp);
+    char* next = GET_NEXT(bp);
+
+    if (prev == NULL && next == NULL) {
+        PUT(free_list[num], NULL);
+    }
+
+    else if (prev != NULL && next == NULL) {
+        PUT(prev + WSIZE, NULL);
+    }
+
+    else if (prev == NULL && next != NULL) {
+        PUT(free_list[num], next);
+        PUT(next, NULL);
+    }
+    
+    else if (prev != NULL && next != NULL) {
+        PUT(prev + WSIZE, next);
+        PUT(next, prev);
+    }
+}
 
 
+static void insert(void *bp) {
+    size_t size = GET_SIZE(HDRP(bp));
+    int num = search(size);
+    if (GET_HEAD(num) == NULL) {
+        PUT(free_list[num], bp);
+        PUT(bp, NULL);
+        PUT((char *)bp + WSIZE, NULL);
+    } else {
+        PUT((char *)bp + WSIZE, GET_HEAD(num));
+        PUT(GET_HEAD(num), bp);
+        PUT(bp, NULL);
+        PUT(free_list[num], bp);
+    }
+}
 
 
-
-
-
+static int search(size_t size) {
+    for (int i = 4; i <= 18; i++) {
+        if (size <= (1 << i))
+            return i - 4;
+    }
+    return 15;
+}
 
 
