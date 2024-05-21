@@ -14,12 +14,17 @@ void *mm_realloc(void *ptr, size_t size);  // 改变指针所指的旧块大小
 
 当然只靠它给的四个函数是无法是实现分配器的，所以我们还要定义宏和辅助函数，当然它也给出了一些可调用的辅助函数，如下：
 ```c
-void  *mem sbrk(int incr);                 // 扩展和收缩堆
-void  *mem heap lo(void);                  // 堆顶指针
-void  *mem heap hi(void);                  // 堆底指针
-size_t mem heapsize(void);                 // 堆目前大小
-size_t mem pagesize(void);                 // 返回系统的页面大小（字节）（在Linux中为4K）。
+void  *mem_sbrk(int incr);                 // 扩展和收缩堆
+void  *mem_heap_lo(void);                  // 堆顶指针
+void  *mem_heap_hi(void);                  // 堆底指针
+size_t mem_heapsize(void);                 // 堆目前大小
+size_t mem_pagesize(void);                 // 返回系统的页面大小（字节）（在Linux中为4K）。
 ```
+书中提到分配器就是要实现`吞吐率最大化`和`内存使用率最大化`，虽然二者经常相互冲突：
+1. 最大化吞吐率
+    + 使分配和释放请求的平均时间最小化来使吞吐率最大化
+2. 最大化内存利用率
+    + 使得`聚集有效载荷(aggregate payload)`比上当前堆的大小的值最大
 ## 知识回顾
 讲到这的话，我们就先来回顾一下`堆`相关的知识
 ### 堆与虚拟内存
@@ -38,25 +43,35 @@ size_t mem pagesize(void);                 // 返回系统的页面大小（字�
 
 但是隐式空闲链表所用的堆块格式其实不太适合作为通用分配器的实现，更好的方法是用显示空闲链表的堆块格式，即我们用两个指针去连接空闲块，堆块格式如下图：
 + 已分配块与之前的堆块格式相同
-+ 空闲块则在有效载荷处插入了两个指针`prev（祖先）`和`next（后继）`
++ 空闲块则在有效载荷处插入了两个指针`prev（前驱）`和`next（后继）`
 ![堆块图片](images/f.png)
 
 
 ### 块序列
 1. 隐式空闲链表
+    + 空闲块是通过头部中的大小字段隐含地连接着的
+    + 放置分配的块时要对整个链表进行搜索，开销过大
 2. 显式空闲链表
+    + 用到了双向链表，使用首次适配时的搜索时间从块总数量的线性时间降低到了空闲块数量的线性时间
+    + 这要求空闲块必须更大已包含所有指针和头、脚部，再加上要求对齐，这潜在提高了`内部碎片`的程度
+
+    + 显式空闲链表有两种维护空闲链表中块的排序策略：
+        1. 后进先出(LIFO)
+        2. 按地址顺序
 3. 分离的空闲链表
 两种基本方法：
-+ 简单分离存储
-+ 分离适配
+    + 简单分离存储
+    + 分离适配
 
 ### 放置策略选择
 #### 1. 首次适配
 + 需从头开始搜索链表从而找到合适的空闲块，时间过长
 + 易将大的空闲块保留在链表后面，也易导致起始处出现过多`小碎片（外部碎片）`
 #### 2. 下一次适配
++ 从上次查询结束的地方开始搜索
 + 时间比首次适配快，但内存利用率低得多
 #### 3. 最佳适配
++ 检查每个空闲块，选择适合请求大小的最小空闲块
 + 内存利用率高，但容易出现对堆进行彻底的搜索的情况
 
 ## 基本思路
@@ -100,6 +115,7 @@ static void *find_fit(size_t asize);          // 首次适配
 static void  place(void *bp, size_t asize);   // 将请求块放置在空闲块的起始位置
 ```
 #### 具体代码
+
 由于书上给出的整体实现代码过长，就不一一贴出，挑几个函数讲一下
 1. extend_heap函数
 ```c
@@ -124,7 +140,8 @@ static void *extend_heap(size_t words) {
 这个函数主要就是用来获得新空闲块来扩展堆，它一般在两种情况下被用到：
 + 堆被初始化时
 + mm_malloc函数没法找到一个合适的空闲块时，需要像内存系统请求额外的堆空间
-2. coalesce函数
+
+2. coalesce函数(用于合并空闲块)
 ```c
 static void *coalesce(void *bp) {
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));  // 前一个块的分配位 
@@ -161,6 +178,26 @@ static void *coalesce(void *bp) {
     }
     return bp;
 }
+```
+3. place函数(用于放置请求块并分割空闲块)
+```c
+static void place(void *bp, size_t asize) {
+    size_t csize = GET_SIZE(HDRP(bp));
+
+    // 当请求块的大小与当前块大小之差（即剩余块）大于16字节时，才进行分割
+    if ((csize - asize) >= 2*DSIZE) {
+        PUT(HDRP(bp), PACK(asize, 1));
+        PUT(FTRP(bp), PACK(asize, 1));
+        bp = NEXT_BLKP(bp);
+        PUT(HDRP(bp), PACK(csize - asize, 0));
+        PUT(FTRP(bp), PACK(csize - asize, 0));
+    }
+    
+    else {
+        PUT(HDRP(bp), PACK(csize, 1));
+        PUT(FTRP(bp), PACK(csize, 1));
+    }
+}
 
 ```
 该方法的整体缺点：
@@ -168,17 +205,137 @@ static void *coalesce(void *bp) {
 + 隐式空闲链表在分配请求块时，搜索时间过长，花费成本过高
 + 立即合并空闲块会导致每释放一个块，就会合并相邻块，有时候会出现抖动，块反复合并又马上分割
 
-[完整代码见仓库](https://github.com/qaok/csapp/blob/master/malloclab/malloclab-handout/mm.c)
+[完整代码见仓库](https://github.com/qaok/csapp/blob/master/malloclab/malloclab-handout/mm1.c)
 ### 2. 基于分离的空闲链表
+隐式空闲链表的搜索效率实在太低，我们尝试一下分离空闲链表，书上有提到关于分离适配的简单版本：即分配器维护着`一个空闲链表的数组`，每个链表是和一个大小类相关联的，并且被组织成某种类型的显式或隐式链表。每个链表包含潜在的大小不同的块，这些块的大小是大小类的成员。
 
-### 隐式空闲链表
+为了分配一个块，必须确定请求的大小类，并且对适当的空闲链表做首次适配，查找一个合适的块。如果找到了，就切割它，并将剩余部分插入到适当的空闲链表中。找不到就搜索下一个更大的大小类的空闲链表。如此重复直至找到合适块，若链表中没有合适块就向操作系统请求额外堆内存。释放块时，对块进行合并。
 
-### 分离的空闲链表
+此处我们使用`显式空闲链表`，并使用`分离适配`的方法来实现分配器，同时我们使用`后进先出（LIFO）`的策略来维护空闲链表，放置策略则选择了`首次适配`，同时也实现了`最佳适配`，堆块格式我们选择前面所提到的第二种堆块格式，先来看看实现思路：
+
++ 除了前面已经定义的宏，我们还要补充几个：
+```c
+// 每个空闲链表的头结点
+#define HEAD(num)     (heap_listp + WSIZE * num)
+// 不同空闲链表头结点存放的第一个块的地址
+#define GET_HEAD(num) ((char *)(long)(GET(HEAD(num))))
+// 空闲块的前驱指针
+#define GET_PREV(bp)  ((char *)(long)(GET(bp)))
+// 空闲块的后继指针
+#define GET_NEXT(bp)  ((char *)(long)(GET((char *)bp + WSIZE)))
+        
+#define LIST_SIZE 16                    // 链表数目
+#define INIT_SIZE (LIST_SIZE * WSIZE)   // 链表初始化大小 
+```
++ 辅助函数也要另外增加两个，下面是辅助函数：
+```c       
+static void *best_fit(size_t asize);    // 最佳适配
+static void  delete(void *bp);          // 删除空闲块   
+static void  insert(void *bp);          // 插入空闲块  
+static int   search(size_t size);       // 确定链表顺序
+```
+
+#### 具体代码
+这次的实现方法中新增了delete、insert、search和best_fit等函数，其余函数变化均不大，因此我们就重点来看看新增的函数
+1. delete函数
+```c
+static void delete(void *bp) {
+    size_t size = GET_SIZE(HDRP(bp));
+    int num = search(size);
+    char* prev = GET_PREV(bp);
+    char* next = GET_NEXT(bp);
+
+    // 此时说明该链表有且仅有这一个空闲块
+    if (prev == NULL && next == NULL) {
+        PUT(free_list[num], NULL);
+    }
+
+    // 此时为链表的最后一个节点即尾结点
+    else if (prev != NULL && next == NULL) {
+        PUT(prev + WSIZE, NULL);
+    }
+
+    // 此时为链表的头节点
+    else if (prev == NULL && next != NULL) {
+        PUT(free_list[num], next);
+        PUT(next, NULL);
+    }
+    
+    // 既不为头节点也不是尾结点
+    else if (prev != NULL && next != NULL) {
+        PUT(prev + WSIZE, next);
+        PUT(next, prev);
+    }
+}
+```
+2. insert函数
+```c
+static void insert(void *bp) {
+    size_t size = GET_SIZE(HDRP(bp));        
+    int num = search(size);                   // 确定该空闲块应属于哪个大小类
+    if (GET_HEAD(num) == NULL) {              // 此种情况为链表为空，无任何空闲块
+        PUT(free_list[num], bp);
+        PUT(bp, NULL);                        // 前驱
+        PUT((char *)bp + WSIZE, NULL);        // 后继
+    } else {
+        // 注意：我们采用的是后进先出（LIFO）策略，因此新块永远位于链表开始处
+        // 将原来头节点设为bp的后继
+        PUT((char *)bp + WSIZE, GET_HEAD(num));
+        // 将链表头节点的前驱设为bp
+        PUT(GET_HEAD(num), bp);
+        // bp的前驱为空
+        PUT(bp, NULL);
+        // 更新链表头节点为bp
+        PUT(free_list[num], bp);
+    }
+}
+```
+3. search函数
+```c
+static int search(size_t size) {
+    for (int i = 4; i <= 18; i++) {
+        if (size <= (1 << i))          // 2 **（i-4）
+            return i - 4;
+    }
+    return 15;
+}
+```
+4. best_fit函数
+```c
+static void *best_fit(size_t asize) {
+    size_t size_gap = 1 << 30;         // 先定一个块的大小差
+    int num = search(asize);
+    char *bp;
+    char *best_addr = NULL, *temp;
+    for (; num < LIST_SIZE; num++) {
+        for(bp = GET_HEAD(num); bp != NULL; bp = GET_NEXT(bp)) {
+            temp = HDRP(bp);
+            // 此时逐步更新大小差，确保是最小的大小差
+            if (GET_SIZE(temp) - asize < size_gap) {
+                size_gap = GET_SIZE(temp) - asize;
+                best_addr = bp;
+                if (GET_SIZE(temp) == asize) return best_addr;
+            }
+        }
+    }
+    return best_addr;
+}
+```
+当数据量足够大的时候，分离的空闲链表的效率比隐式链表要高出太多
+
+分离适配方法是一种很常见的选择，因为它搜索时间短，内存利用率也不低
+
 [完整代码见仓库](https://github.com/qaok/csapp/blob/master/malloclab/malloclab-handout/mm.c)
 ## 代码测试
 ### 1. 隐式空闲链表
 测试结果如下：
 
 只得到50分，效果很一般，因此我们不考虑使用这种方法
-![堆块图片](images/e.png)
++ ![堆块图片](images/e.png)
 ### 2. 分离的空闲链表
+1. 用最佳适配的结果如下：有85分
++ ![堆块图片](images/h.png)
+
+2. 用首次适配的结果如下：
++ ![堆块图片](images/i.png)
+
